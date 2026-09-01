@@ -11,11 +11,13 @@ import {
 type Stage = "creating" | "waiting" | "connecting" | "connected" | "error";
 type Transfer = { id:string; name:string; size:number; progress:number; direction:"send"|"receive"; status:"active"|"done"|"error"; url?:string };
 type FileMessage = { type:"meta"; id:string; name:string; size:number; mime:string } | { type:"end"; id:string };
-type SignalMessage = { type:string; sdp?:RTCSessionDescriptionInit; candidate?:RTCIceCandidateInit; message?:string };
+type SignalMessage = { type:string; sdp?:RTCSessionDescriptionInit; candidate?:RTCIceCandidateInit; message?:string; networkHost?:string };
 
 const formatBytes=(value:number)=>{const units=["B","KB","MB","GB"];if(!value)return "0 B";const i=Math.min(Math.floor(Math.log(value)/Math.log(1024)),3);return `${(value/1024**i).toFixed(i?1:0)} ${units[i]}`;};
 const fileIcon=(name:string)=>{const ext=name.split(".").pop()?.toLowerCase();if(["png","jpg","jpeg","gif","webp","heic"].includes(ext||""))return ImageIcon;if(["mp3","wav","m4a","flac"].includes(ext||""))return Music2;if(["zip","rar","7z","tar","gz"].includes(ext||""))return FileArchive;return FileText;};
 const makeId=()=>`${Date.now().toString(36)}-${Math.random().toString(36).slice(2,12)}`;
+const isLocalOnlyHost=(hostname:string)=>["localhost","127.0.0.1","0.0.0.0","::1","[::1]"].includes(hostname.toLowerCase().replace(/\.$/,""));
+const makeJoinUrl=(room:string,networkHost?:string)=>{const url=new URL(window.location.href);if(isLocalOnlyHost(url.hostname)&&networkHost)url.hostname=networkHost;url.search="";url.hash="";url.searchParams.set("room",room);return url.toString();};
 
 export default function Home(){
   const [stage,setStage]=useState<Stage>("creating");
@@ -91,18 +93,21 @@ export default function Home(){
 
     socket.onopen=async()=>{
       send({type:"join",room,role:guest?"guest":"host"});
-      if(!guest){
-        const joinUrl=`${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(room)}`;
-        setJoinUrl(joinUrl);
-        setQr(await QRCode.toDataURL(joinUrl,{width:520,margin:1,errorCorrectionLevel:"M",color:{dark:"#12221b",light:"#ffffff"}}));
-        setStage("waiting");
-      }else setStage("connecting");
     };
 
     socket.onmessage=async(event)=>{
       try{
         const message=JSON.parse(event.data) as SignalMessage;
-        if(message.type==="ready"&&!guest&&!negotiated.current){
+        if(message.type==="joined"){
+          if(guest)setStage("connecting");
+          else{
+            if(isLocalOnlyHost(window.location.hostname)&&!message.networkHost){setError("未检测到局域网地址，请连接 Wi-Fi 后刷新页面");setStage("error");return;}
+            const url=makeJoinUrl(room,message.networkHost);
+            setJoinUrl(url);
+            setQr(await QRCode.toDataURL(url,{width:520,margin:1,errorCorrectionLevel:"M",color:{dark:"#12221b",light:"#ffffff"}}));
+            setStage("waiting");
+          }
+        }else if(message.type==="ready"&&!guest&&!negotiated.current){
           negotiated.current=true;
           setStage("connecting");
           const offer=await pc.createOffer();
