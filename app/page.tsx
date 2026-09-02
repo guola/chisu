@@ -11,13 +11,14 @@ import {
 type Stage = "creating" | "waiting" | "connecting" | "connected" | "error";
 type Transfer = { id:string; name:string; size:number; progress:number; direction:"send"|"receive"; status:"active"|"done"|"error"; url?:string };
 type FileMessage = { type:"meta"; id:string; name:string; size:number; mime:string } | { type:"end"; id:string };
-type SignalMessage = { type:string; sdp?:RTCSessionDescriptionInit; candidate?:RTCIceCandidateInit; message?:string; networkHost?:string };
+type SignalMessage = { type:string; sdp?:RTCSessionDescriptionInit; candidate?:RTCIceCandidateInit; message?:string; networkHost?:string; tunnelDetected?:boolean };
 
 const formatBytes=(value:number)=>{const units=["B","KB","MB","GB"];if(!value)return "0 B";const i=Math.min(Math.floor(Math.log(value)/Math.log(1024)),3);return `${(value/1024**i).toFixed(i?1:0)} ${units[i]}`;};
 const fileIcon=(name:string)=>{const ext=name.split(".").pop()?.toLowerCase();if(["png","jpg","jpeg","gif","webp","heic"].includes(ext||""))return ImageIcon;if(["mp3","wav","m4a","flac"].includes(ext||""))return Music2;if(["zip","rar","7z","tar","gz"].includes(ext||""))return FileArchive;return FileText;};
 const makeId=()=>`${Date.now().toString(36)}-${Math.random().toString(36).slice(2,12)}`;
 const isLocalOnlyHost=(hostname:string)=>["localhost","127.0.0.1","0.0.0.0","::1","[::1]"].includes(hostname.toLowerCase().replace(/\.$/,""));
 const makeJoinUrl=(room:string,networkHost?:string)=>{const url=new URL(window.location.href);if(isLocalOnlyHost(url.hostname)&&networkHost)url.hostname=networkHost;url.search="";url.hash="";url.searchParams.set("room",room);return url.toString();};
+const proxyHelp="请确认两台设备连接同一 Wi-Fi；若开启 Shadowrocket 或 VPN，请启用“绕过局域网”后重试";
 
 export default function Home(){
   const [stage,setStage]=useState<Stage>("creating");
@@ -25,6 +26,7 @@ export default function Home(){
   const [qr,setQr]=useState("");
   const [joinUrl,setJoinUrl]=useState("");
   const [error,setError]=useState("");
+  const [proxyDetected,setProxyDetected]=useState(false);
   const [dragging,setDragging]=useState(false);
   const [transfers,setTransfers]=useState<Transfer[]>([]);
   const pcRef=useRef<RTCPeerConnection|null>(null);
@@ -82,13 +84,15 @@ export default function Home(){
     const protocol=window.location.protocol==="https:"?"wss":"ws";
     const socket=new WebSocket(`${protocol}://${window.location.hostname}:3001`);
     socketRef.current=socket;
+    let connectionTimer:ReturnType<typeof setTimeout>|undefined;
     const send=(message:object)=>{if(socket.readyState===WebSocket.OPEN)socket.send(JSON.stringify(message));};
     const applyPending=async()=>{for(const candidate of pendingCandidates.current)await pc.addIceCandidate(candidate);pendingCandidates.current=[];};
+    const startConnectionTimer=()=>{clearTimeout(connectionTimer);connectionTimer=setTimeout(()=>{if(channelRef.current?.readyState!=="open"){setError(`连接超时，${proxyHelp}`);setStage("error");}},15000);};
 
     pc.onicecandidate=event=>{if(event.candidate)send({type:"candidate",candidate:event.candidate.toJSON()});};
     pc.onconnectionstatechange=()=>{
-      if(pc.connectionState==="connected")setStage("connected");
-      if(pc.connectionState==="failed"){setError("未能连接设备，请确认两台设备连接同一 Wi-Fi 后刷新重试");setStage("error");}
+      if(pc.connectionState==="connected"){clearTimeout(connectionTimer);setStage("connected");}
+      if(pc.connectionState==="failed"){clearTimeout(connectionTimer);setError(`未能连接设备，${proxyHelp}`);setStage("error");}
     };
 
     socket.onopen=async()=>{
@@ -99,6 +103,7 @@ export default function Home(){
       try{
         const message=JSON.parse(event.data) as SignalMessage;
         if(message.type==="joined"){
+          setProxyDetected(Boolean(message.tunnelDetected));
           if(guest)setStage("connecting");
           else{
             if(isLocalOnlyHost(window.location.hostname)&&!message.networkHost){setError("未检测到局域网地址，请连接 Wi-Fi 后刷新页面");setStage("error");return;}
@@ -110,10 +115,12 @@ export default function Home(){
         }else if(message.type==="ready"&&!guest&&!negotiated.current){
           negotiated.current=true;
           setStage("connecting");
+          startConnectionTimer();
           const offer=await pc.createOffer();
           await pc.setLocalDescription(offer);
           send({type:"offer",sdp:pc.localDescription});
         }else if(message.type==="offer"&&guest&&message.sdp){
+          startConnectionTimer();
           await pc.setRemoteDescription(message.sdp);
           await applyPending();
           const answer=await pc.createAnswer();
@@ -132,12 +139,12 @@ export default function Home(){
         }
       }catch(err){
         console.error("WebRTC negotiation failed",err);
-        setError("连接协商失败，请刷新两端页面重新扫码");setStage("error");
+        clearTimeout(connectionTimer);setError(`连接协商失败，${proxyHelp}`);setStage("error");
       }
     };
-    socket.onerror=()=>{if(channelRef.current?.readyState!=="open"){setError("本地连接服务未启动，请在电脑上重新运行项目");setStage("error");}};
+    socket.onerror=()=>{if(channelRef.current?.readyState!=="open"){setError(`无法访问本地连接服务，${proxyHelp}`);setStage("error");}};
 
-    return()=>{socket.close();pc.close();};
+    return()=>{clearTimeout(connectionTimer);socket.close();pc.close();};
   },[setupChannel]);
 
   const sendFiles=useCallback(async(files:FileList|File[])=>{
@@ -172,6 +179,7 @@ export default function Home(){
         {!isGuest&&!connected&&stage!=="error"&&<div className="qrArea" data-join-url={joinUrl}>
           <div className="qrFrame">{qr?<img src={qr} alt="连接二维码"/>:<LoaderCircle className="spin" size={38}/>}<span className="corner c1"/><span className="corner c2"/><span className="corner c3"/><span className="corner c4"/></div>
           <div className="steps"><div><b>1</b><span><strong>一眼相逢</strong><small>手机轻扫二维码</small></span></div><div><b>2</b><span><strong>两端意通</strong><small>无需确认，自动直连</small></span></div><div><b>3</b><span><strong>尺素即达</strong><small>任意文件，双向直传</small></span></div></div>
+          {proxyDetected&&<div className="proxyHint"><Wifi size={13}/>已避开代理网卡；手机端代理需允许访问局域网</div>}
         </div>}
         {(isGuest||connected)&&stage!=="error"&&<div className="deviceArea"><div className="devicePair"><div><Laptop size={32}/></div><span><i/><i/><i/></span><div><Smartphone size={28}/></div></div><h2>{connected?"一眼相逢，尺素即通":"正在与彼端相逢…"}</h2><p>{connected?"现在可以双向直传文件了":"转瞬即达，请稍候"}</p></div>}
         {error&&<div className="errorBar"><X size={15}/>{error}</div>}

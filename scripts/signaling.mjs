@@ -1,8 +1,9 @@
 import { WebSocketServer, WebSocket } from "ws";
-import { findDefaultLanIPv4 } from "./network-address.mjs";
+import { findDefaultLanIPv4, hasTunnelInterface } from "./network-address.mjs";
 
 const port = Number(process.env.SIGNAL_PORT || 3001);
 const networkHost = process.env.CHISU_LAN_HOST?.trim() || await findDefaultLanIPv4();
+const tunnelDetected = hasTunnelInterface();
 const rooms = new Map();
 const wss = new WebSocketServer({ host: "0.0.0.0", port });
 
@@ -35,7 +36,7 @@ wss.on("connection", (socket) => {
       peers[role] = socket;
       rooms.set(room, peers);
       socket.session = { room, role };
-      send(socket, { type: "joined", role, networkHost });
+      send(socket, { type: "joined", role, networkHost, tunnelDetected });
       if (peers.host && peers.guest) {
         send(peers.host, { type: "ready" });
         send(peers.guest, { type: "ready" });
@@ -55,3 +56,4 @@ wss.on("connection", (socket) => {
 
 console.log(`Local signaling ready on ws://0.0.0.0:${port}`);
 if (networkHost) console.log(`Phone access: http://${networkHost}:3000/`);
+if (tunnelDetected) console.log("VPN/proxy tunnel detected; physical LAN address selected for QR code.");
